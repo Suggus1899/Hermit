@@ -1,0 +1,21 @@
+Package: hermit
+Version: 1.0.0
+Section: base
+Priority: optional
+Architecture: amd64
+Depends: libc6 (>= 2.31), libssl3 (>= 3.0), libcrypto3 (>= 3.0), libarchive13 (>= 3.4), libcurl4 (>= 7.68), libyaml-0-2 (>= 0.2.5)
+Maintainer: Hermit Team <team@hermit.io>
+Homepage: https://github.com/hermit/hermit
+Description: Hermit - A lightweight container runtime with Docker-like CLI
+ Hermit is a fast, secure, and lightweight container runtime that provides
+ a complete container platform with Docker-compatible CLI. It features:
+ .
+  - Runtime with full namespace and cgroup support
+  - Image building with layer caching and deduplication
+  - Storage with overlayfs and volume management
+  - Registry support with authentication and mirrors
+  - Orchestration with compose file support
+  - Security profiles and observability
+ .
+ This package contains the main hermit CLI tool and hermitd daemon.
+EOF

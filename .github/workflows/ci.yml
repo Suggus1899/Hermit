@@ -1,0 +1,419 @@
+name: Hermit CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop, 'feature/*', 'hotfix/*' ]
+  pull_request:
+    branches: [ main, develop ]
+  release:
+    types: [ published ]
+
+env:
+  PROJECT_NAME: hermit
+  BUILD_TYPE: Release
+  ENABLE_SANITIZERS: OFF
+  ENABLE_COVERAGE: OFF
+
+jobs:
+  # Build and test matrix
+  build-test-matrix:
+    name: Build & Test (${{ matrix.os }}, ${{ matrix.compiler }}, ${{ matrix.build_type }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04, ubuntu-22.04, windows-2022, macos-12]
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+        include:
+          # Enable sanitizers and coverage for debug builds on Linux
+          - os: ubuntu-22.04
+            compiler: gcc
+            build_type: Debug
+            enable_sanitizers: ON
+            enable_coverage: ON
+          - os: ubuntu-22.04
+            compiler: clang
+            build_type: Debug
+            enable_sanitizers: ON
+            enable_coverage: ON
+        exclude:
+          # Exclude clang on Windows
+          - os: windows-2022
+            compiler: clang
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better analysis
+    
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v1.14
+      with:
+        cmake-version: '3.22.x'
+    
+    - name: Setup Python (for tools)
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          pkg-config \
+          libssl-dev \
+          libcurl4-openssl-dev \
+          libyaml-dev \
+          libarchive-dev \
+          libcap-dev \
+          libseccomp-dev \
+          valgrind \
+          cppcheck \
+          clang-tidy \
+          clang \
+          lcov \
+          gcovr \
+          doxygen \
+          python3-pip
+        
+        pip install --user conan==1.59.0
+    
+    - name: Install dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install \
+          cmake \
+          ninja \
+          openssl \
+          curl \
+          yaml-cpp \
+          libarchive \
+          cppcheck \
+          llvm \
+          lcov
+        
+        pip install --user conan==1.59.0
+    
+    - name: Install dependencies (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        choco install \
+          cmake \
+          ninja \
+          openssl \
+          curl \
+          yaml-cpp \
+          libarchive \
+          cppcheck \
+          llvm
+        
+        pip install --user conan==1.59.0
+    
+    - name: Setup Conan
+      run: |
+        conan profile detect --force
+        conan config set general.revisions_enabled=1
+    
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DCMAKE_C_COMPILER=${{ matrix.compiler }} \
+          -DHERMIT_BUILD_TESTS=ON \
+          -DHERMIT_BUILD_TOOLS=ON \
+          -DHERMIT_BUILD_BENCHMARKS=ON \
+          -DHERMIT_BUILD_FUZZ=ON \
+          -DHERMIT_ENABLE_SANITIZERS=${{ matrix.enable_sanitizers || 'OFF' }} \
+          -DHERMIT_ENABLE_COVERAGE=${{ matrix.enable_coverage || 'OFF' }} \
+          -DHERMIT_ENABLE_STATIC_ANALYSIS=ON
+    
+    - name: Build
+      run: |
+        cmake --build build --config ${{ matrix.build_type }} --parallel 4
+    
+    - name: Run Unit Tests
+      run: |
+        cd build
+        ctest --output-on-failure --parallel 2 --repeat until-pass:3 -C ${{ matrix.build_type }}
+    
+    - name: Run Integration Tests
+      run: |
+        cd build
+        if [ -f "./hermit_integration_tests" ]; then
+          ./hermit_integration_tests --gtest_output=xml:integration_results.xml
+        fi
+    
+    - name: Run Benchmarks
+      run: |
+        cd build
+        if [ -f "./hermit_benchmarks" ]; then
+          ./hermit_benchmarks --output=benchmark_results.json
+        fi
+    
+    - name: Run Fuzz Tests (Debug only)
+      if: matrix.build_type == 'Debug' && runner.os == 'Linux'
+      run: |
+        cd build
+        if [ -f "./hermit_fuzzer" ]; then
+          timeout 120s ./hermit_fuzzer || true
+        fi
+    
+    - name: Static Analysis (Linux only)
+      if: runner.os == 'Linux'
+      run: |
+        cd build
+        make cppcheck || true
+        make clang-tidy || true
+    
+    - name: Memory Check (Linux only)
+      if: runner.os == 'Linux' && matrix.build_type == 'Debug'
+      run: |
+        cd build
+        if [ -f "./hermit_tests" ]; then
+          valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 ./hermit_tests || true
+        fi
+    
+    - name: Coverage Report (Linux Debug only)
+      if: matrix.enable_coverage == 'ON'
+      run: |
+        cd build
+        gcov ../src/**/*.c || true
+        lcov --capture --directory . --output-file coverage.info
+        genhtml coverage.info --output-directory coverage_html
+        gcovr --xml --output coverage.xml ../src/
+    
+    - name: Upload Coverage to Codecov
+      if: matrix.enable_coverage == 'ON'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./build/coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+    
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}
+        path: |
+          build/test_results.xml
+          build/integration_results.xml
+          build/benchmark_results.json
+          build/cppcheck-report.xml
+          build/coverage_html/
+    
+    - name: Upload Coverage HTML
+      uses: actions/upload-artifact@v3
+      if: matrix.enable_coverage == 'ON'
+      with:
+        name: coverage-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}
+        path: build/coverage_html/
+
+  # Security scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-22.04
+    needs: build-test-matrix
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy Results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+      with:
+        languages: cpp
+    
+    - name: Run Security Tests
+      run: |
+        chmod +x scripts/ci/ci_pipeline.sh
+        ./scripts/ci/ci_pipeline.sh security
+
+  # Performance testing
+  performance-test:
+    name: Performance Test
+    runs-on: ubuntu-22.04
+    needs: build-test-matrix
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake pkg-config libssl-dev libcurl4-openssl-dev libyaml-dev libarchive-dev libcap-dev
+    
+    - name: Build Release
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DHERMIT_BUILD_BENCHMARKS=ON
+        cmake --build build --parallel 4
+    
+    - name: Run Performance Tests
+      run: |
+        cd build
+        ./hermit_benchmarks --output=benchmark_results.json --format=json
+    
+    - name: Upload Benchmark Results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: build/benchmark_results.json
+    
+    - name: Performance Regression Check
+      run: |
+        # Compare with baseline and fail if regression > 10%
+        python3 scripts/ci/check_performance_regression.py build/benchmark_results.json
+
+  # Package and Release
+  package-release:
+    name: Package & Release
+    runs-on: ${{ matrix.os }}
+    needs: [build-test-matrix, security-scan, performance-test]
+    if: github.event_name == 'release'
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-12]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Dependencies
+      run: |
+        if [ "$RUNNER_OS" == "Linux" ]; then
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libssl-dev libcurl4-openssl-dev libyaml-dev libarchive-dev libcap-dev
+        elif [ "$RUNNER_OS" == "macOS" ]; then
+          brew install cmake openssl curl yaml-cpp libarchive
+        elif [ "$RUNNER_OS" == "Windows" ]; then
+          choco install cmake openssl curl yaml-cpp libarchive
+        fi
+    
+    - name: Build Release
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --parallel 4
+    
+    - name: Package
+      run: |
+        cd build
+        cpack
+    
+    - name: Upload Release Assets
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./build/hermit-${{ github.event.release.tag_name }}-Linux.deb
+        asset_name: hermit-${{ github.event.release.tag_name }}-Linux.deb
+        asset_content_type: application/vnd.debian.binary-package
+
+  # Documentation
+  documentation:
+    name: Documentation
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake doxygen graphviz
+    
+    - name: Generate Documentation
+      run: |
+        cmake -B build -DHERMIT_BUILD_DOCS=ON
+        cd build
+        make docs
+    
+    - name: Deploy to GitHub Pages
+      if: github.ref == 'refs/heads/main'
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./build/docs/html
+
+  # Docker image build
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-22.04
+    needs: [build-test-matrix, security-scan]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: |
+          hermit/container-runtime:latest
+          hermit/container-runtime:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+  # Cross-compilation
+  cross-compile:
+    name: Cross Compile
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        target: [x86_64-w64-mingw32, aarch64-linux-gnu, arm-linux-gnueabihf]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Cross Compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-${{ matrix.target }} cmake
+    
+    - name: Cross Compile
+      run: |
+        cmake -B build-${{ matrix.target }} \
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/${{ matrix.target }}.cmake \
+          -DCMAKE_BUILD_TYPE=Release
+        cmake --build build-${{ matrix.target }} --parallel 4
+    
+    - name: Upload Cross-Compiled Binaries
+      uses: actions/upload-artifact@v3
+      with:
+        name: hermit-${{ matrix.target }}
+        path: build-${{ matrix.target }}/hermit*

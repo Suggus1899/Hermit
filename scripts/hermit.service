@@ -1,0 +1,47 @@
+[Unit]
+Description=Hermit Container Runtime
+Documentation=https://github.com/hermit/hermit
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/hermitd
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermitd
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelModules=true
+ProtectProc=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryDenyWrite=/proc/kcore
+MemoryDenyWrite=/sys/firmware
+MemoryDenyWrite=/sys/power/state
+
+# Resource limits
+LimitNOFILE=1048576
+LimitNPROC=4096
+
+# Environment
+Environment=HERMITD_STATE_DIR=/var/lib/hermitd
+Environment=HERMITD_SOCKET_PATH=/run/hermit.sock
+Environment=HERMIT_LOG_LEVEL=info
+
+[Install]
+WantedBy=multi-user.target
+Alias=hermit.service
